@@ -34,6 +34,10 @@ class GameState:
         # Promotion default
         self.promotion_piece = chess.QUEEN
 
+        # Take-back support
+        self.history         = []      # snapshots of state before each move
+        self.takeback_used   = False   # only one take-back allowed per move
+
         # Start the clock for white
         self._start_clock()
 
@@ -87,6 +91,9 @@ class GameState:
         
         Returns: dict with result info for the phone app
         """
+        if self.check_takeback(new_board_state):
+            return self.apply_takeback()
+
         if self.game_over:
             return {'status': 'game_over', 'result': self.result}
 
@@ -102,6 +109,20 @@ class GameState:
         if move is None:
             self.desync = True
             return {'status': 'desync', 'message': 'Illegal move detected.'}
+
+        # Snapshot the current state before applying this move (for take-back).
+        # move_uci is filled in now that the move has been inferred, but before
+        # it is applied to the board.
+        self.history.append({
+            'board_state':     list(self.state),
+            'chess_board_fen': self.chess_board.fen(),
+            'turn':            self.chess_board.turn,
+            'white_clock':     self.white_time,
+            'black_clock':     self.black_time,
+            'move_uci':        move.uci(),
+        })
+        # New accepted move resets take-back eligibility.
+        self.takeback_used = False
 
         # Stop the current player's clock
         self._stop_clock()
@@ -131,6 +152,50 @@ class GameState:
                 self._start_clock()
 
         return self.get_sync_packet()
+
+    # ── Take-back ──────────────────────────────────────────────────
+
+    def check_takeback(self, new_board_state):
+        """
+        Return True if new_board_state exactly matches the board state that
+        existed before the last move — i.e. the player physically returned the
+        piece to its original square.
+        """
+        if len(self.history) < 1:
+            return False
+        if self.takeback_used:
+            return False
+
+        previous = self.history[-1]['board_state']
+        if len(new_board_state) != len(previous):
+            return False
+        for current, prior in zip(new_board_state, previous):
+            if current != prior:
+                return False
+        return True
+
+    def apply_takeback(self):
+        """
+        Undo the last move by restoring the most recent snapshot.
+        """
+        snapshot = self.history.pop()
+
+        self.state       = snapshot['board_state']
+        self.white_time  = snapshot['white_clock']
+        self.black_time  = snapshot['black_clock']
+        self.chess_board = chess.Board(snapshot['chess_board_fen'])
+        if self.move_history:
+            self.move_history.pop()
+
+        self.takeback_used = True
+
+        return {
+            "type":        "takeback",
+            "fen":         self.chess_board.fen(),
+            "turn":        snapshot['turn'],
+            "white_clock": self.white_time,
+            "black_clock": self.black_time,
+        }
 
     def resync(self, fen):
         """
